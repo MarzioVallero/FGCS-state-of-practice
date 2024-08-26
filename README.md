@@ -1,4 +1,4 @@
-# quirion-explorer
+# misty-rainforest
 A wrapper to benchmark execution time and memory usage of various quantum benchmarking suites.
 
 # Installation

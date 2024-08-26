@@ -126,6 +126,7 @@ for circuit_name in circuits:
                 stream_ptr = cp.cuda.get_current_stream().ptr
                 comm_nccl.reduce(result.data.ptr, result.data.ptr, result.size*16, nccl.NCCL_CHAR, nccl.NCCL_SUM, root, stream_ptr)
 
+                cp.cuda.runtime.deviceSynchronize()
                 comm.Barrier()
                 if rank == root:
                     end_contract = MPI.Wtime()

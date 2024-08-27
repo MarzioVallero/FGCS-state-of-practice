@@ -33,6 +33,10 @@ root = 0
 comm = MPI.COMM_WORLD
 rank, size = comm.Get_rank(), comm.Get_size()
 
+# Note that all NCCL operations must be performed in the correct device context.
+device_id = rank % getDeviceCount()
+cp.cuda.Device(device_id).use()
+
 # Set up the NCCL communicator.
 nccl_id = nccl.get_unique_id() if rank == root else None
 nccl_id = comm.bcast(nccl_id, root)
@@ -46,6 +50,9 @@ for circuit_name in circuits:
         if circuit_name == "random" and num_qubits >= 28:
             continue
         for slice_limit in slice_limits:
+            # compute the bitstring amplitude
+            bitstring = '0' * num_qubits
+
             # Define quantum circuit and convert it to an Eninstein summation
             args = ["circuit", "--frontend", frontend, "--backend", backend, "--benchmark", circuit_name, "--nqubits", f"{num_qubits}", "--nwarmups", f"{nwarmups}", "--nrepeats", f"{nrepeats}", "--new"]
             runner = run(args, get_runner=True)
@@ -68,11 +75,7 @@ for circuit_name in circuits:
             for i in range(nwarmups + nrepeats):
 
                 myconverter = CircuitToEinsum(circuit, dtype='complex128', backend=cp)
-                expression, operands_conv = myconverter.amplitude("0"*num_qubits) #.statevector() is bottlenecked by memory
-
-                # Note that all NCCL operations must be performed in the correct device context.
-                device_id = rank % getDeviceCount()
-                cp.cuda.Device(device_id).use()
+                expression, operands_conv = myconverter.amplitude(bitstring) #.statevector() is bottlenecked by memory
 
                 # Set the operand data on root.
                 if rank == root:
@@ -87,17 +90,19 @@ for circuit_name in circuits:
 
                 # # Create network object.
                 with Network(expression, *operands) as network:
+                    start_pathfinding = cp.cuda.Event()
+                    end_pathfinding = cp.cuda.Event()
+                    start_contract = cp.cuda.Event()
+                    end_contract = cp.cuda.Event()
+                    
                     comm.Barrier()
-                    if rank == root:
-                        start_pathfinding = MPI.Wtime()
+                    start_pathfinding.record()
 
                     # Compute the path on all ranks with 8 samples for hyperoptimization. Force slicing to enable parallel contraction.
                     path, info = network.contract_path(optimize={'samples': samples, 'slicing': {'min_slices': min_slices}})
 
                     # Select the best path from all ranks. Note that we still use the MPI communicator here for simplicity.
                     opt_cost, sender = comm.allreduce(sendobj=(info.opt_cost, rank), op=MPI.MINLOC)
-                    if rank == root:
-                        print(f"Process {sender} has the path with the lowest FLOP count {opt_cost}.")
 
                     # Broadcast info from the sender to all other ranks.
                     info = comm.bcast(info, sender)
@@ -106,8 +111,8 @@ for circuit_name in circuits:
                     path, info = network.contract_path(optimize={'path': info.path, 'slicing': info.slices})
 
                     comm.Barrier()
-                    if rank == root:
-                        end_pathfinding = MPI.Wtime()
+                    end_pathfinding.record()
+                    end_pathfinding.synchronize()
 
                     # Calculate this process's share of the slices.
                     num_slices = info.num_slices
@@ -116,11 +121,8 @@ for circuit_name in circuits:
                     slice_end = num_slices if rank == size - 1 else (rank + 1) * chunk + min(rank + 1, extra)
                     slices = range(slice_begin, slice_end)
 
-                    print(f"Process {rank} is processing slice range: {slices}.")
-
                     comm.Barrier()
-                    if rank == root:
-                        start_contract = MPI.Wtime()
+                    start_contract.record()
 
                     # Contract the group of slices the process is responsible for.
                     result = network.contract(slices=slices, release_workspace=True)
@@ -131,15 +133,15 @@ for circuit_name in circuits:
 
                     cp.cuda.runtime.deviceSynchronize()
                     comm.Barrier()
-                    if rank == root:
-                        end_contract = MPI.Wtime()
+                    end_contract.record()
+                    end_contract.synchronize()
 
                     # Check correctness.
                     if rank == root and i >= nwarmups:
-                        print(f"Circuit {circuit_name}({num_qubits} qubits) on {min_slices} slices and {num_gpus} gpus, total time required: {end_contract - start_contract}\n")
-                        data_list.append({"circuit":circuit_name, "num_qubits":num_qubits, "n_slices":min_slices, "n_gpus":num_gpus, "contract_time_seconds":end_contract - start_contract, "pathfinding_time_seconds":end_pathfinding - start_pathfinding})
-
-
+                        pathfinding_elapsed_gpu_time = cp.cuda.get_elapsed_time(start_pathfinding, end_pathfinding) / 1000
+                        contract_elapsed_gpu_time = cp.cuda.get_elapsed_time(start_contract, end_contract) / 1000
+                        print(f"Circuit {circuit_name}({num_qubits} qubits) on {min_slices} slices and {num_gpus} gpus, total time required: {contract_elapsed_gpu_time}\n")
+                        data_list.append({"circuit":circuit_name, "num_qubits":num_qubits, "n_slices":min_slices, "n_gpus":num_gpus, "contract_time_seconds":contract_elapsed_gpu_time, "pathfinding_time_seconds":pathfinding_elapsed_gpu_time})
 
     if rank == root:
         try:

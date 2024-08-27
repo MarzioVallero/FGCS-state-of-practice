@@ -21,7 +21,7 @@ num_gpus = getDeviceCount()
 
 # Breaking outer loops
 circuit_name = "qft"
-num_qubits = 4
+num_qubits = 32
 
 args = ["circuit", "--frontend", frontend, "--backend", backend, "--benchmark", circuit_name, "--nqubits", f"{num_qubits}", "--nwarmups", f"{nwarmups}", "--nrepeats", f"{nrepeats}", "--new"]
 runner = run(args, get_runner=True)

@@ -1,15 +1,10 @@
 from mpi4py import MPI
-import numpy as np
 import cupy as cp
 from cupy.cuda import nccl
 from cupy.cuda.runtime import getDeviceCount
-
-import qiskit
-from cuquantum import CircuitToEinsum
-from cuquantum import Network
+from cuquantum import contract, CircuitToEinsum, Network
 from run import run
 import pandas as pd
-import pickle
 
 frontend = "qiskit"
 backend = "cutn"
@@ -29,8 +24,6 @@ rank, size = comm.Get_rank(), comm.Get_size()
 # Note that all NCCL operations must be performed in the correct device context.
 device_id = rank % getDeviceCount()
 cp.cuda.Device(device_id).use()
-
-print(rank, size, device_id, getDeviceCount())
 
 # Set up the NCCL communicator.
 nccl_id = nccl.get_unique_id() if rank == root else None
@@ -59,7 +52,11 @@ for circuit_name in circuits:
             runner.benchmark_object = benchmark_object
             runner.benchmark_config = benchmark_config
             circuit = runner._load_or_generate_circuit(f"circuits/{circuit_name}_{num_qubits}")
-            circuit.draw()
+            
+            exact_amplitude = None
+            converter = CircuitToEinsum(circuit, dtype='complex128', backend=cp)
+            expression, operands = converter.amplitude(bitstring)
+            exact_amplitude = contract(expression, *operands)
 
             # Hyperparameters
             samples = 8
@@ -134,8 +131,8 @@ for circuit_name in circuits:
                     if rank == root and i >= nwarmups:
                         pathfinding_elapsed_gpu_time = float(cp.cuda.get_elapsed_time(start_pathfinding, end_pathfinding)) / 1000
                         contract_elapsed_gpu_time = float(cp.cuda.get_elapsed_time(start_contract, end_contract)) / 1000
-                        print(f"Circuit {circuit_name}({num_qubits} qubits) on {min_slices} slices and {num_gpus} gpus, total time required: {contract_elapsed_gpu_time}\n")
-                        data_list.append({"circuit":circuit_name, "num_qubits":num_qubits, "n_slices":min_slices, "n_gpus":num_gpus, "contract_time_seconds":contract_elapsed_gpu_time, "pathfinding_time_seconds":pathfinding_elapsed_gpu_time})
+                        print(f"Circuit {circuit_name}({num_qubits} qubits) on {min_slices} slices and {size} gpus ({num_gpus} gpus on {size / num_gpus} nodes), total time required: {contract_elapsed_gpu_time} s\nResult exact: {exact_amplitude}\nResult paral: {result}\nDifference: {exact_amplitude-result}")
+                        data_list.append({"circuit":circuit_name, "num_qubits":num_qubits, "n_slices":min_slices, "n_gpus":size, "contract_time_seconds":contract_elapsed_gpu_time, "pathfinding_time_seconds":pathfinding_elapsed_gpu_time, "parallel_amplitude":result, "exact_amplitude":exact_amplitude})
 
     if rank == root:
         try:

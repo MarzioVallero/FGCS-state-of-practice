@@ -65,7 +65,7 @@ for circuit_name in circuits:
                     elapsed_gpu_time = float(cp.cuda.get_elapsed_time(start_gpu, end_gpu)) / 1000
 
                     if i >= nwarmups:
-                        print(f"Circuit {circuit_name}({num_qubits} qubits) with {rel_cutoff} SVD cutoff (max_extent: {max_extent}), total time required: {elapsed_gpu_time}\n")
+                        print(f"Circuit {circuit_name}({num_qubits} qubits) with {rel_cutoff} SVD cutoff (max_extent: {max_extent}), total time required: {elapsed_gpu_time} s\n")
                         data_list.append({"circuit":circuit_name, "num_qubits":num_qubits, "rel_cutoff":rel_cutoff, "max_extent":max_extent, "contract_time_seconds":elapsed_gpu_time, "approx_amplitude":amplitude, "exact_amplitude":exact_amplitude})
 
     try:

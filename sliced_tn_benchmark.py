@@ -57,6 +57,7 @@ for circuit_name in circuits:
             converter = CircuitToEinsum(circuit, dtype='complex128', backend=cp)
             expression, operands = converter.amplitude(bitstring)
             exact_amplitude = contract(expression, *operands)
+            exact_amplitude = complex(exact_amplitude)
 
             # Hyperparameters
             samples = 8

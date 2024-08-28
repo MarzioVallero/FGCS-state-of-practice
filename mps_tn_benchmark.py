@@ -46,6 +46,7 @@ for circuit_name in circuits:
         converter = CircuitToEinsum(circuit, dtype='complex128', backend=cp)
         expression, operands = converter.amplitude(bitstring)
         exact_amplitude = contract(expression, *operands)
+        exact_amplitude = complex(exact_amplitude)
 
         for rel_cutoff in rel_cutoffs:                  
             for i in range(nwarmups + nrepeats):
@@ -63,6 +64,8 @@ for circuit_name in circuits:
                     end_gpu.record()
                     end_gpu.synchronize()
                     elapsed_gpu_time = float(cp.cuda.get_elapsed_time(start_gpu, end_gpu)) / 1000
+
+                    amplitude = complex(amplitude)
 
                     if i >= nwarmups:
                         print(f"Circuit {circuit_name}({num_qubits} qubits) with {rel_cutoff} SVD cutoff (max_extent: {max_extent}), total time required: {elapsed_gpu_time} s\n")

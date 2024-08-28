@@ -1,15 +1,8 @@
-# %%
-"""
-Example illustrating slice-based parallel tensor network contraction with cuQuantum using MPI.
-
-$ mpiexec -n 4 python example2_mpi.py
-"""
-# Sphinx
+from mpi4py import MPI
 import numpy as np
 import cupy as cp
 from cupy.cuda import nccl
 from cupy.cuda.runtime import getDeviceCount
-from mpi4py import MPI
 
 import qiskit
 from cuquantum import CircuitToEinsum
@@ -21,7 +14,7 @@ import pickle
 frontend = "qiskit"
 backend = "cutn"
 nwarmups = 1
-nrepeats = 2
+nrepeats = 10
 config = {"measure":True, "unfold":False, "p":1, "ansatz":"x", "num_layers":1, "time_step":1, "total_time":1}
 circuits = ["qft", "qpe", "qaoa", "hidden_shift", "vqe", "bv", "hamiltonian_sim", "random"]
 circuit_sizes = [2, 4, 8, 12, 16, 20, 24, 28, 32]
@@ -37,12 +30,13 @@ rank, size = comm.Get_rank(), comm.Get_size()
 device_id = rank % getDeviceCount()
 cp.cuda.Device(device_id).use()
 
+print(rank, size, device_id, getDeviceCount())
+
 # Set up the NCCL communicator.
 nccl_id = nccl.get_unique_id() if rank == root else None
 nccl_id = comm.bcast(nccl_id, root)
 comm_nccl = nccl.NcclCommunicator(size, nccl_id, rank)
 
-# %%
 for circuit_name in circuits:
     data_list = []
 
@@ -138,8 +132,8 @@ for circuit_name in circuits:
 
                     # Check correctness.
                     if rank == root and i >= nwarmups:
-                        pathfinding_elapsed_gpu_time = cp.cuda.get_elapsed_time(start_pathfinding, end_pathfinding) / 1000
-                        contract_elapsed_gpu_time = cp.cuda.get_elapsed_time(start_contract, end_contract) / 1000
+                        pathfinding_elapsed_gpu_time = float(cp.cuda.get_elapsed_time(start_pathfinding, end_pathfinding)) / 1000
+                        contract_elapsed_gpu_time = float(cp.cuda.get_elapsed_time(start_contract, end_contract)) / 1000
                         print(f"Circuit {circuit_name}({num_qubits} qubits) on {min_slices} slices and {num_gpus} gpus, total time required: {contract_elapsed_gpu_time}\n")
                         data_list.append({"circuit":circuit_name, "num_qubits":num_qubits, "n_slices":min_slices, "n_gpus":num_gpus, "contract_time_seconds":contract_elapsed_gpu_time, "pathfinding_time_seconds":pathfinding_elapsed_gpu_time})
 
@@ -153,5 +147,3 @@ for circuit_name in circuits:
         pd.to_pickle(df, "data/sliced_tn_data.pkl")  
 
 comm_nccl.destroy()
-
-# %%

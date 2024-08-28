@@ -1,4 +1,3 @@
-# %%
 import numpy as np
 import cupy as cp
 from run import run
@@ -23,7 +22,6 @@ rel_cutoffs = [1e-12, 1e-10, 1e-8, 1e-6, 1e-4, 1e-2]
 # Max number of eigenvalues truncated by SVD, quantum tensors are at max order-4
 max_extent = 4
 
-# %%
 for circuit_name in circuits:
     data_list = []
 
@@ -64,7 +62,7 @@ for circuit_name in circuits:
 
                     end_gpu.record()
                     end_gpu.synchronize()
-                    elapsed_gpu_time = cp.cuda.get_elapsed_time(start_gpu, end_gpu) / 1000
+                    elapsed_gpu_time = float(cp.cuda.get_elapsed_time(start_gpu, end_gpu)) / 1000
 
                     if i >= nwarmups:
                         print(f"Circuit {circuit_name}({num_qubits} qubits) with {rel_cutoff} SVD cutoff (max_extent: {max_extent}), total time required: {elapsed_gpu_time}\n")

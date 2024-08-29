@@ -9,7 +9,7 @@ import pandas as pd
 frontend = "qiskit"
 backend = "cutn"
 nwarmups = 1
-nrepeats = 10
+nrepeats = 5
 config = {"measure":True, "unfold":False, "p":1, "ansatz":"x", "num_layers":1, "time_step":1, "total_time":1}
 circuits = ["qft", "qpe", "qaoa", "hidden_shift", "vqe", "bv", "hamiltonian_sim", "random"]
 circuit_sizes = [2, 4, 8, 12, 16, 20, 24, 28, 32]
@@ -57,7 +57,7 @@ for circuit_name in circuits:
             converter = CircuitToEinsum(circuit, dtype='complex128', backend=cp)
             expression, operands = converter.amplitude(bitstring)
             exact_amplitude = contract(expression, *operands)
-            exact_amplitude = complex(exact_amplitude)
+            exact_amplitude = cp.asnumpy(exact_amplitude).item()
 
             # Hyperparameters
             samples = 8
@@ -66,19 +66,16 @@ for circuit_name in circuits:
 
             for i in range(nwarmups + nrepeats):
 
-                myconverter = CircuitToEinsum(circuit, dtype='complex128', backend=cp)
-                expression, operands_conv = myconverter.amplitude(bitstring) #.statevector() is bottlenecked by memory
-
                 # Set the operand data on root.
                 if rank == root:
-                    operands = operands_conv
+                    operands = operands
                 else:
-                    operands = [cp.empty(o.shape, dtype='complex128') for o in operands_conv]
+                    operands = [cp.empty(o.shape, dtype='complex128') for o in operands]
 
                 # Broadcast the operand data. We pass in the CuPy ndarray data pointers to the NCCL APIs.
                 stream_ptr = cp.cuda.get_current_stream().ptr
                 for operand in operands:
-                    comm_nccl.broadcast(operand.data.ptr, operand.data.ptr, operand.size*16, nccl.NCCL_CHAR, root, stream_ptr)
+                    comm_nccl.broadcast(operand.data.ptr, operand.data.ptr, operand.size*operand.dtype.itemsize, nccl.NCCL_FLOAT64, root, stream_ptr)
 
                 # # Create network object.
                 with Network(expression, *operands) as network:
@@ -121,18 +118,20 @@ for circuit_name in circuits:
 
                     # Sum the partial contribution from each process on root.
                     stream_ptr = cp.cuda.get_current_stream().ptr
-                    comm_nccl.reduce(result.data.ptr, result.data.ptr, result.size*16, nccl.NCCL_CHAR, nccl.NCCL_SUM, root, stream_ptr)
+                    comm_nccl.reduce(result.data.ptr, result.data.ptr, result.size * result.dtype.itemsize, nccl.NCCL_FLOAT64, nccl.NCCL_SUM, root, stream_ptr)
 
                     cp.cuda.runtime.deviceSynchronize()
                     comm.Barrier()
                     end_contract.record()
                     end_contract.synchronize()
 
+                    result = cp.asnumpy(result).item()
+
                     # Check correctness.
                     if rank == root and i >= nwarmups:
                         pathfinding_elapsed_gpu_time = float(cp.cuda.get_elapsed_time(start_pathfinding, end_pathfinding)) / 1000
                         contract_elapsed_gpu_time = float(cp.cuda.get_elapsed_time(start_contract, end_contract)) / 1000
-                        print(f"Circuit {circuit_name}({num_qubits} qubits) on {min_slices} slices and {size} gpus ({num_gpus} gpus on {size / num_gpus} nodes), total time required: {contract_elapsed_gpu_time} s\nResult exact: {exact_amplitude}\nResult paral: {result}\nDifference: {exact_amplitude-result}")
+                        print(f"Circuit {circuit_name}({num_qubits} qubits) on {min_slices} slices and {size} gpus ({num_gpus} gpus on {int(size / num_gpus)} nodes), total time required: {contract_elapsed_gpu_time} s\nResult exact: {exact_amplitude}\nResult paral: {result}\nDifference: {exact_amplitude-result}\n")
                         data_list.append({"circuit":circuit_name, "num_qubits":num_qubits, "n_slices":min_slices, "n_gpus":size, "contract_time_seconds":contract_elapsed_gpu_time, "pathfinding_time_seconds":pathfinding_elapsed_gpu_time, "parallel_amplitude":result, "exact_amplitude":exact_amplitude})
 
     if rank == root:

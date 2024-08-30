@@ -30,6 +30,11 @@ nccl_id = nccl.get_unique_id() if rank == root else None
 nccl_id = comm.bcast(nccl_id, root)
 comm_nccl = nccl.NcclCommunicator(size, nccl_id, rank)
 
+# Remove memory manager to avoid memory leaks
+cp.cuda.set_allocator(None)
+# Sum the partial contribution from each process on root.
+stream_ptr = cp.cuda.get_current_stream().ptr
+
 for circuit_name in circuits:
     data_list = []
 
@@ -38,29 +43,35 @@ for circuit_name in circuits:
             continue
         for slice_limit in slice_limits:
             # compute the bitstring amplitude
-            bitstring = '0' * num_qubits
+            bitstring = ["0" if bit % 2 == 0 else "1" for bit in range(num_qubits)]
 
-            # Define quantum circuit and convert it to an Eninstein summation
-            args = ["circuit", "--frontend", frontend, "--backend", backend, "--benchmark", circuit_name, "--nqubits", f"{num_qubits}", "--nwarmups", f"{nwarmups}", "--nrepeats", f"{nrepeats}", "--new"]
-            runner = run(args, get_runner=True)
-            runner.nqubits = num_qubits
-            b = runner._benchmarks[circuit_name]
-            benchmark_object = b['benchmark']
-            benchmark_config = config
-            benchmark_config['precision'] = "single"  # some frontends may need it
-            runner.benchmark_name = circuit_name
-            runner.benchmark_object = benchmark_object
-            runner.benchmark_config = benchmark_config
-            circuit = runner._load_or_generate_circuit(f"circuits/{circuit_name}_{num_qubits}")
-            
-            exact_amplitude = None
-            converter = CircuitToEinsum(circuit, dtype='complex128', backend=cp)
-            expression, operands = converter.amplitude(bitstring)
-            exact_amplitude = contract(expression, *operands)
-            exact_amplitude = cp.asnumpy(exact_amplitude).item()
+            expression, operands = None, None
+            if rank == root:
+                # Define quantum circuit and convert it to an Eninstein summation
+                args = ["circuit", "--frontend", frontend, "--backend", backend, "--benchmark", circuit_name, "--nqubits", f"{num_qubits}", "--nwarmups", f"{nwarmups}", "--nrepeats", f"{nrepeats}", "--new"]
+                runner = run(args, get_runner=True)
+                runner.nqubits = num_qubits
+                b = runner._benchmarks[circuit_name]
+                benchmark_object = b['benchmark']
+                benchmark_config = config
+                benchmark_config['precision'] = "single"  # some frontends may need it
+                runner.benchmark_name = circuit_name
+                runner.benchmark_object = benchmark_object
+                runner.benchmark_config = benchmark_config
+                circuit = runner._load_or_generate_circuit(f"circuits/{circuit_name}_{num_qubits}")
+                
+                exact_amplitude = None
+                converter = CircuitToEinsum(circuit, dtype='complex128', backend=cp)
+                expression, operands = converter.amplitude(bitstring)
+                exact_amplitude = contract(expression, *operands, stream=stream_ptr)
+                exact_amplitude = cp.asnumpy(exact_amplitude).item()
+
+            comm.Barrier()
+            expression = comm.bcast(expression, root)
+            operands = comm.bcast(operands, root)
 
             # Hyperparameters
-            samples = 8
+            samples = 16
             # min_slices = max(16, size)
             min_slices = slice_limit
 
@@ -73,12 +84,11 @@ for circuit_name in circuits:
                     operands = [cp.empty(o.shape, dtype='complex128') for o in operands]
 
                 # Broadcast the operand data. We pass in the CuPy ndarray data pointers to the NCCL APIs.
-                stream_ptr = cp.cuda.get_current_stream().ptr
                 for operand in operands:
                     comm_nccl.broadcast(operand.data.ptr, operand.data.ptr, operand.size*operand.dtype.itemsize, nccl.NCCL_FLOAT64, root, stream_ptr)
 
                 # # Create network object.
-                with Network(expression, *operands) as network:
+                with Network(expression, *operands, stream=stream_ptr) as network:
                     start_pathfinding = cp.cuda.Event()
                     end_pathfinding = cp.cuda.Event()
                     start_contract = cp.cuda.Event()
@@ -88,7 +98,7 @@ for circuit_name in circuits:
                     start_pathfinding.record()
 
                     # Compute the path on all ranks with 8 samples for hyperoptimization. Force slicing to enable parallel contraction.
-                    path, info = network.contract_path(optimize={'samples': samples, 'slicing': {'min_slices': min_slices}})
+                    path, info = network.contract_path(optimize={'samples': samples, 'slicing': {'min_slices': min_slices}, 'seed':42})
 
                     # Select the best path from all ranks. Note that we still use the MPI communicator here for simplicity.
                     opt_cost, sender = comm.allreduce(sendobj=(info.opt_cost, rank), op=MPI.MINLOC)
@@ -97,7 +107,7 @@ for circuit_name in circuits:
                     info = comm.bcast(info, sender)
 
                     # Set path and slices.
-                    path, info = network.contract_path(optimize={'path': info.path, 'slicing': info.slices})
+                    path, info = network.contract_path(optimize={'path': info.path, 'slicing': info.slices, 'seed':42})
 
                     comm.Barrier()
                     end_pathfinding.record()
@@ -114,25 +124,21 @@ for circuit_name in circuits:
                     start_contract.record()
 
                     # Contract the group of slices the process is responsible for.
-                    result = network.contract(slices=slices, release_workspace=True)
+                    result = network.contract(slices=slices, stream=stream_ptr)
 
-                    # Sum the partial contribution from each process on root.
-                    stream_ptr = cp.cuda.get_current_stream().ptr
                     comm_nccl.reduce(result.data.ptr, result.data.ptr, result.size * result.dtype.itemsize, nccl.NCCL_FLOAT64, nccl.NCCL_SUM, root, stream_ptr)
 
-                    cp.cuda.runtime.deviceSynchronize()
                     comm.Barrier()
                     end_contract.record()
                     end_contract.synchronize()
 
-                    result = cp.asnumpy(result).item()
-
                     # Check correctness.
                     if rank == root and i >= nwarmups:
+                        parallel_amplitude = result.item()
                         pathfinding_elapsed_gpu_time = float(cp.cuda.get_elapsed_time(start_pathfinding, end_pathfinding)) / 1000
                         contract_elapsed_gpu_time = float(cp.cuda.get_elapsed_time(start_contract, end_contract)) / 1000
-                        print(f"Circuit {circuit_name}({num_qubits} qubits) on {min_slices} slices and {size} gpus ({num_gpus} gpus on {int(size / num_gpus)} nodes), total time required: {contract_elapsed_gpu_time} s\nResult exact: {exact_amplitude}\nResult paral: {result}\nDifference: {exact_amplitude-result}\n")
-                        data_list.append({"circuit":circuit_name, "num_qubits":num_qubits, "n_slices":min_slices, "n_gpus":size, "contract_time_seconds":contract_elapsed_gpu_time, "pathfinding_time_seconds":pathfinding_elapsed_gpu_time, "parallel_amplitude":result, "exact_amplitude":exact_amplitude})
+                        print(f"Circuit {circuit_name}({num_qubits} qubits) on {min_slices} slices and {size} gpus ({num_gpus} gpus on {int(size / num_gpus)} nodes), total time required: {contract_elapsed_gpu_time} s\nResult exact: {exact_amplitude}\nResult paral: {parallel_amplitude}\nDifference: {exact_amplitude-parallel_amplitude}\n")
+                        data_list.append({"circuit":circuit_name, "num_qubits":num_qubits, "n_slices":min_slices, "n_gpus":size, "contract_time_seconds":contract_elapsed_gpu_time, "pathfinding_time_seconds":pathfinding_elapsed_gpu_time, "parallel_amplitude":parallel_amplitude, "exact_amplitude":exact_amplitude})
 
     if rank == root:
         try:

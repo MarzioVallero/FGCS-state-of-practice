@@ -13,8 +13,8 @@ nwarmups_contraction = 1
 nrepeats_contraction = 5
 nrepeats_pathfinding = 1
 config = {"measure":True, "unfold":False, "p":1, "ansatz":"x", "num_layers":1, "time_step":1, "total_time":1}
-circuits = ["qft", "qpe", "qaoa", "hidden_shift", "vqe", "bv", "hamiltonian_sim", "random"]
-circuit_sizes = [32] #[2, 4, 8, 12, 16, 20, 24, 28, 32]
+circuits = ["qft", "qpe", "qaoa"] #["qft", "qpe", "qaoa", "hidden_shift", "vqe", "bv", "hamiltonian_sim", "random"]
+circuit_sizes = [64] #[2, 4, 8, 12, 16, 20, 24, 28, 32]
 slices_per_gpu = [1] #[2, 4, 8, 16, 32]
 reconfig_iterations = [32] #[0, 2, 4, 8, 16, 32, 64]
 num_gpus = getDeviceCount()
@@ -41,7 +41,7 @@ stream_ptr = cp.cuda.get_current_stream().ptr
 for circuit_name, num_qubits in product(circuits, circuit_sizes):
     data_list = []
     if circuit_name == "random" and num_qubits >= 28:
-        num_qubits = 28
+        continue
     # compute the bitstring amplitude
     bitstring = ["0" if bit % 2 == 0 else "1" for bit in range(num_qubits)]
 

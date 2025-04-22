@@ -33,9 +33,9 @@ for circuit in circuits_to_test:
                 args.append("1")
             if backend == "cusvaer":
                 args.append("--cusvaer-global-index-bits")
-                args.append("1,0") # X,Y where 2^X is GPUs per node, 2^Y is number of nodes
+                args.append("2,0") # X,Y where 2^X is GPUs per node, 2^Y is number of nodes
                 args.append("--cusvaer-p2p-device-bits")
-                args.append("1") # Number of GPUs on node with direct interconnect
+                args.append("4") # Number of GPUs on node with direct interconnect
             # gpu_mod = "--ngpus 1" if (backend != 'cirq' and backend != 'qsim') else ""
             # command = f"/home/marzio.vallero/miniconda3/envs/callisto/bin/python /home/marzio.vallero/misty-rainforest/run.py circuit --frontend {frontend} --backend {backend} --benchmark {circuit} --nqubits {num_qubits} {gpu_mod} --nwarmups {nwarmups} --nrepeats {nrepeats} --new"
             # print(command)
